@@ -6,12 +6,19 @@ from yt_dlp import YoutubeDL
 def progress_hook(d):
     if d["status"] == "downloading":
         percent = d.get("_percent_str", "0.0%").strip()
-        speed = d.get("_speed_str", "Unknown speed").strip()
-        eta = d.get("_eta_str", "Unknown ETA").strip()
+        speed = d.get("_speed_str", "?").strip()
+        eta = d.get("_eta_str", "?").strip()
         sys.stdout.write(f"\r[Downloading] {percent}, Speed: {speed}, ETA: {eta}")
         sys.stdout.flush()
     elif d["status"] == "finished":
         print("\nDownload complete! Processing...")
+
+
+def height_from_resolution(resolution):
+    try:
+        return int(resolution.split("x")[-1])
+    except (ValueError, AttributeError):
+        return 0
 
 
 def get_available_formats(url, quiet=True):
@@ -25,10 +32,10 @@ def get_available_formats(url, quiet=True):
 
     formats = info.get("formats", [])
     title = info.get("title", "Unknown Title")
+    duration = info.get("duration_string", "?")
 
-    video_only = []
+    video_only = {}
     audio_only = []
-    full_video = []
 
     for f in formats:
         if not f.get("url"):
@@ -38,41 +45,59 @@ def get_available_formats(url, quiet=True):
         acodec = f.get("acodec", "none")
         ext = f.get("ext", "")
         resolution = f.get("resolution") or f.get("format_note", "unknown")
+        tbr = f.get("tbr") or 0
 
         if vcodec != "none" and acodec == "none":
-            video_only.append({"format_id": f["format_id"], "resolution": resolution, "ext": ext})
+            existing = video_only.get(resolution)
+            if not existing or tbr > existing["tbr"]:
+                video_only[resolution] = {
+                    "format_id": f["format_id"],
+                    "resolution": resolution,
+                    "ext": ext,
+                    "tbr": tbr,
+                    "fps": f.get("fps"),
+                }
         elif vcodec == "none" and acodec != "none":
-            abr = f.get("abr", "unknown")
+            abr = f.get("abr", 0) or 0
             audio_only.append({"format_id": f["format_id"], "abr": abr, "ext": ext})
-        elif vcodec != "none" and acodec != "none":
-            full_video.append({"format_id": f["format_id"], "resolution": resolution, "ext": ext})
 
-    # return AFTER the loop finishes, not inside it
-    return title, full_video, video_only, audio_only
+    video_only_list = sorted(video_only.values(), key=lambda x: height_from_resolution(x["resolution"]), reverse=True)
+    audio_only_sorted = sorted(audio_only, key=lambda x: x["abr"], reverse=True)
+
+    return title, duration, video_only_list, audio_only_sorted
 
 
-def prompt_user_choice(options, label_key):
+def print_header(title, duration):
+    print()
+    print("=" * 60)
+    print(f"{title}")
+    print(f"Duration: {duration}")
+    print("=" * 60)
+
+
+def prompt_user_choice(options, label):
     if not options:
-        print(f"No {label_key} formats available.")
+        print(f"No {label} formats available.")
         sys.exit(1)
-    print(f"\nAvailable {label_key} options:")
+    print(f"\n{label} — choose a quality:\n")
     for idx, opt in enumerate(options, 1):
-        desc = opt.get("resolution") or f"{opt.get('abr')} kbps"
-        print(f"[{idx}] Quality: {desc} (format: {opt['ext']})")
+        if "abr" in opt:
+            desc = f"{int(opt['abr'])} kbps"
+        else:
+            fps = f" {opt['fps']}fps" if opt.get("fps") else ""
+            desc = f"{opt['resolution']}{fps}"
+        print(f"  [{idx}]  {desc:<18} ({opt['ext']})")
 
     while True:
-        try:
-            choice = int(input(f"Select option (1-{len(options)}): "))
-            if 1 <= choice <= len(options):
-                return options[choice - 1]["format_id"]
-        except ValueError:
-            pass
-        print("Invalid choice... please try again")
+        raw = input(f"\n  Select (1-{len(options)}): ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print("  Invalid choice, try again.")
 
 
-def build_ydl_opts(format_id, output_dir, as_mp3=False):
+def build_ydl_opts(format_spec, output_dir, as_mp3=False):
     ydl_opts = {
-        "format": format_id,
+        "format": format_spec,
         "progress_hooks": [progress_hook],
         "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
     }
@@ -82,11 +107,13 @@ def build_ydl_opts(format_id, output_dir, as_mp3=False):
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
+    else:
+        ydl_opts["merge_output_format"] = "mp4"
     return ydl_opts
 
 
-def download(url, format_id, output_dir, as_mp3=False):
-    ydl_opts = build_ydl_opts(format_id, output_dir, as_mp3)
+def download(url, format_spec, output_dir, as_mp3=False):
+    ydl_opts = build_ydl_opts(format_spec, output_dir, as_mp3)
     print("\nDownloading...")
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -97,54 +124,30 @@ def main():
     parser = argparse.ArgumentParser(description="Simple YouTube downloading CLI app!")
     parser.add_argument("url", help="YouTube video URL")
     parser.add_argument("-o", "--output", default=".", help="Output directory (default: current folder)")
-    parser.add_argument("-a", "--audio-only", action="store_true", help="Skip menu, download best audio as MP3")
-    parser.add_argument("-b", "--best-video", action="store_true", help="Skip menu, download best full video")
-    parser.add_argument("--list-formats", action="store_true", help="List available formats and exit")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress yt-dlp's own log output")
     args = parser.parse_args()
 
     print("Fetching info...")
-    title, full_video, video_only, audio_only = get_available_formats(args.url, quiet=args.quiet)
-    print(f"\nTitle: {title}")
+    title, duration, video_only, audio_only = get_available_formats(args.url, quiet=args.quiet)
+    print_header(title, duration)
 
-    if args.list_formats:
-        for label, opts in [("Full Video", full_video), ("Video Only", video_only), ("Audio Only", audio_only)]:
-            print(f"\n--- {label} ---")
-            for opt in opts:
-                desc = opt.get("resolution") or f"{opt.get('abr')} kbps"
-                print(f"  id={opt['format_id']:>6}  {desc}  ({opt['ext']})")
-        return
-
-    if args.audio_only:
-        format_id = prompt_user_choice(audio_only, "Audio Only")
-        download(args.url, format_id, args.output, as_mp3=True)
-        return
-
-    if args.best_video:
-        format_id = prompt_user_choice(full_video, "Full Video")
-        download(args.url, format_id, args.output)
-        return
-
-    print("\nChoose Download Type:")
-    print(" [1] Full Video")
-    print(" [2] Video Only")
-    print(" [3] Audio Only")
+    print("\nWhat do you want to download?")
+    print("  [1] Video")
+    print("  [2] Audio only")
 
     while True:
-        choice = input("Choose: ").strip()
-        if choice in ["1", "2", "3"]:
+        choice = input("\nChoose: ").strip()
+        if choice in ["1", "2"]:
             break
         print("Invalid selection.")
 
     if choice == "1":
-        format_id = prompt_user_choice(full_video, "Full Video")
-        download(args.url, format_id, args.output)
-    elif choice == "2":
-        format_id = prompt_user_choice(video_only, "Video Only")
-        download(args.url, format_id, args.output)
-    elif choice == "3":
-        format_id = prompt_user_choice(audio_only, "Audio Only")
-        download(args.url, format_id, args.output, as_mp3=True)
+        picked = prompt_user_choice(video_only, "Video")
+        format_spec = f"{picked['format_id']}+bestaudio/best"
+        download(args.url, format_spec, args.output)
+    else:
+        picked = prompt_user_choice(audio_only, "Audio")
+        download(args.url, picked["format_id"], args.output, as_mp3=True)
 
 
 if __name__ == "__main__":
