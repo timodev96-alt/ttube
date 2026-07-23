@@ -1,225 +1,151 @@
 import argparse
-import urllib.request
-import json
-import re
-from urllib.parse import parse_qs
+import sys
+from yt_dlp import YoutubeDL
 
-HEADERS={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/120.0.0.0 Safari/537.36"
-    }
 
-def fetch(url):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req) as response:
-        return response.read()
+def progress_hook(d):
+    if d["status"] == "downloading":
+        percent = d.get("_percent_str", "0.0%").strip()
+        speed = d.get("_speed_str", "Unknown speed").strip()
+        eta = d.get("_eta_str", "Unknown ETA").strip()
+        sys.stdout.write(f"\r[Downloading] {percent}, Speed: {speed}, ETA: {eta}")
+        sys.stdout.flush()
+    elif d["status"] == "finished":
+        print("\nDownload complete! Processing...")
 
-def fetch_html(url):
-    return fetch(url).decode("utf-8")
 
-def extract_player_response(html):
-    marker = "var ytInitialPlayerResponse = "
-    start = html.find(marker)
-    if start == -1 :
-        raise ValueError("Could not find ytInitialPlayerResponse in HTML")
-    start += len(marker)
+def get_available_formats(url, quiet=True):
+    ydl_opts = {"quiet": quiet, "no_warnings": quiet}
+    with YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            print(f"Error fetching video info: {e}")
+            sys.exit(1)
 
-    depth = 0
-    end = start
-    
-    for i in range(start, len(html)):
-        if html[i] == "{":
-            depth += 1
-        elif html[i] == "}":
-            depth -= 1
-            if depth ==0:
-                end = i+1
-                break
+    formats = info.get("formats", [])
+    title = info.get("title", "Unknown Title")
 
-    return json.loads(html[start:end])
+    video_only = []
+    audio_only = []
+    full_video = []
 
-def get_player_js_url(html):
-    match = re.search(r'"[^"]*/player_ias\.base\.js"', html) or \
-            re.search(r'"[^"]*/base\.js"', html)
-    if not match:
-        raise ValueError("Could not find player JS URL")
-    js_url = match.group(0).strip('"')
-    if js_url.startswith("//"):
-        js_url = "https:" + js_url
-    elif js_url.startswith("/"):
-        js_url = "https://www.youtube.com" + js_url
-    return js_url
-
-def find_cipher_function_name(js):
-    pattern = re.compile(
-        r'([a-zA-Z0-9$]{1,5})=function\(([a-zA-Z0-9$]{1,3})\)\{'
-        r'\2=\2\.split\(""\)'
-    )
-    matches = pattern.findall(js)
-    if not matches:
-        raise ValueError("Could not find decipher function name")
-    return matches[0][0]
-
-def get_function_body(js, func_name):
-    pattern = re.compile(re.escape(func_name) + r"=function\(a\)\{(.*?)\}")
-    match = pattern.search(js)
-    if not match:
-        raise ValueError("Could not find function body")
-    return match.group(1)
-
-def get_helper_object(js, obj_name):
-    pattern = re.compile(r"var\s+" + re.escape(obj_name) + r"\s*=\s*\{(.*?)\};" , re.DOTALL)
-    match = pattern.search(js)
-    if not match:
-        raise ValueError("Could not find helper object")
-    obj_body = match.group(1)
-
-    methods = {}
-    for m in re.finditer(r"([a-zA-Z0-9$]{2,3}):function\(([^)]*)\)\{([^}]*)\}", obj_body):
-        name, code = m.group(1), m.group(3)
-        if "reverse" in code:
-            methods[name] = "reverse"
-        elif "splice" in code:
-            methods[name] = "splice"
-        else:
-            methods[name] = "swap"
-    return methods
-
-def get_helper_object_name(body):
-    match = re.search(r"([a-zA-Z0-9$]{2,3})\.[a-zA-Z0-9$]{2,3}\(a,\d+\)", body)
-    if not match:
-        raise ValueError("Could not find helper object name")
-    return match.group(1)
-
-def get_operations(body, obj_name, methods):
-    ops = []
-    for m in re.finditer(re.escape(obj_name)+ r"\.([a-zA-Z0-9$]{2,3})\(a,(\d+)\)", body):
-        methods_name , arg = m.group(1) , int(m.group(2))
-        ops.append((methods.get(methods_name), arg))
-    return ops
-
-def apply_operations(signature, operations):
-    a = list(signature)
-    for op_type, arg in operations:
-        if op_type == "reverse":
-            a.reverse()
-        elif op_type == "splice":
-            a = a[arg:]
-        elif op_type == "swap":
-            arg = arg % len(a)
-            a[0], a[arg] = a[arg], a[0]
-    return "".join(a)
-
-def extract_functions(js):
-    for m in re.finditer(r'([a-zA-Z0-9$]{1,6})=function\(([a-zA-Z0-9$]{1,3})\)\{', js):
-        name, param = m.group(1), m.group(2)
-        body_start = m.end()
-        depth = 1
-        i = body_start
-        while i < len(js) and depth > 0:
-            if js[i] == '{':
-                depth += 1
-            elif js[i] == '}':
-                depth -= 1
-            i += 1
-        if depth == 0:
-            yield name, param, js[body_start:i-1]
-
-def decipher_signature(js, signature):
-    candidates = []
-    for name, param, body in extract_functions(js):
-        if len(body) > 400:
-            continue
-        if f'{param}=' + param + '.split(' not in body.replace('"', '').replace("'", ''):
-            continue
-        op_calls = re.findall(r'([a-zA-Z0-9$]{1,3})\.([a-zA-Z0-9$]{1,3})\(' + re.escape(param) + r',\d+\)', body)
-        if len(op_calls) >= 2:
-            candidates.append((name, param, body))
-
-    if not candidates:
-        raise ValueError("Could not find decipher function name")
-
-    print(f"Found {len(candidates)} real candidate(s):")
-    for name, param, body in candidates:
-        print(f"--- {name}(param={param}) ---")
-        print(body)
-        print()
-    name, param, body = candidates[0]
-    obj_name = get_helper_object_name(body)
-    methods = get_helper_object(js, obj_name)
-    operations = get_operations(body, obj_name, methods)
-    return apply_operations(signature, operations)
-
-def get_download_url(format_info, js):
-    cipher = format_info.get("signatureCipher") or format_info.get("cipher")
-    if not cipher:
-        return format_info.get("url")
-    parsed = parse_qs(cipher)
-    signature = parsed["s"][0]
-    sp = parsed.get("sp", ["signature"])[0]
-    base_url = parsed["url"][0]
-    decoded_signature = decipher_signature(js, signature)
-    return f'{base_url}&{sp}={decoded_signature}'
-
-def list_formats(player_response):
-    streaming_data = player_response.get("streamingData", {})
-    formats = streaming_data.get("formats", [])
-    adaptive_formats = player_response.get("streamingData", {}).get("adaptiveFormats", [])
-    if adaptive_formats:
-        print(json.dumps(adaptive_formats[0], indent=2))
-
-    print("\n ===Full Video===")
     for f in formats:
-        itag = f.get("itag")
-        quality = f.get("qualityLabel", f.get("quality", "?"))
-        mime = f.get("mimeType", "?")
-        has_url = "url" in f
-        has_cipher = "signatureCipher" in f or "cipher" in f
-        print(f'itag={itag} quality={quality} mime={mime[:30]} url={has_url} cipher={has_cipher}')
-    print("\n ===Video Only / Audio Only===")
-    for f in adaptive_formats:
-        itag = f.get(itag)
-        quality = f.get("qualityLabel", f.get("quality", "?"))
-        mime = f.get("mimeType", "?")
-        has_url = "url" in f
-        has_cipher = "signatureCipher" in f or "cipher" in f
-        print(f'itag={itag} quality={quality} mime={mime[:30]} url={has_url} cipher={has_cipher}')
+        if not f.get("url"):
+            continue
+
+        vcodec = f.get("vcodec", "none")
+        acodec = f.get("acodec", "none")
+        ext = f.get("ext", "")
+        resolution = f.get("resolution") or f.get("format_note", "unknown")
+
+        if vcodec != "none" and acodec == "none":
+            video_only.append({"format_id": f["format_id"], "resolution": resolution, "ext": ext})
+        elif vcodec == "none" and acodec != "none":
+            abr = f.get("abr", "unknown")
+            audio_only.append({"format_id": f["format_id"], "abr": abr, "ext": ext})
+        elif vcodec != "none" and acodec != "none":
+            full_video.append({"format_id": f["format_id"], "resolution": resolution, "ext": ext})
+
+    # return AFTER the loop finishes, not inside it
+    return title, full_video, video_only, audio_only
+
+
+def prompt_user_choice(options, label_key):
+    if not options:
+        print(f"No {label_key} formats available.")
+        sys.exit(1)
+    print(f"\nAvailable {label_key} options:")
+    for idx, opt in enumerate(options, 1):
+        desc = opt.get("resolution") or f"{opt.get('abr')} kbps"
+        print(f"[{idx}] Quality: {desc} (format: {opt['ext']})")
+
+    while True:
+        try:
+            choice = int(input(f"Select option (1-{len(options)}): "))
+            if 1 <= choice <= len(options):
+                return options[choice - 1]["format_id"]
+        except ValueError:
+            pass
+        print("Invalid choice... please try again")
+
+
+def build_ydl_opts(format_id, output_dir, as_mp3=False):
+    ydl_opts = {
+        "format": format_id,
+        "progress_hooks": [progress_hook],
+        "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
+    }
+    if as_mp3:
+        ydl_opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
+    return ydl_opts
+
+
+def download(url, format_id, output_dir, as_mp3=False):
+    ydl_opts = build_ydl_opts(format_id, output_dir, as_mp3)
+    print("\nDownloading...")
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    print("\nDone!")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Download youtube videos")
-    parser.add_argument("url", help="Youtube Video URL")
+    parser = argparse.ArgumentParser(description="Simple YouTube downloading CLI app!")
+    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument("-o", "--output", default=".", help="Output directory (default: current folder)")
+    parser.add_argument("-a", "--audio-only", action="store_true", help="Skip menu, download best audio as MP3")
+    parser.add_argument("-b", "--best-video", action="store_true", help="Skip menu, download best full video")
+    parser.add_argument("--list-formats", action="store_true", help="List available formats and exit")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress yt-dlp's own log output")
     args = parser.parse_args()
 
-    print(f'Fetching: {args.url}')
-    html = fetch_html(args.url)
-    player_response = extract_player_response(html)
-    title = player_response.get("videoDetails", {}).get("title", "video")
-    print(f"Title: {title}")
+    print("Fetching info...")
+    title, full_video, video_only, audio_only = get_available_formats(args.url, quiet=args.quiet)
+    print(f"\nTitle: {title}")
 
-    formats = player_response.get("streamingData", {}).get("formats", [])
-    target = next((f for f in formats if f.get("itag")==18), None)
-    if not target:
-        raise ValueError("itag 18 not found in this video's format")
+    if args.list_formats:
+        for label, opts in [("Full Video", full_video), ("Video Only", video_only), ("Audio Only", audio_only)]:
+            print(f"\n--- {label} ---")
+            for opt in opts:
+                desc = opt.get("resolution") or f"{opt.get('abr')} kbps"
+                print(f"  id={opt['format_id']:>6}  {desc}  ({opt['ext']})")
+        return
 
-    print("Fetching Player js")
-    js_url = get_player_js_url(html)
-    print(f"JS URL: {js_url}")
-    js = fetch(js_url).decode("utf-8")
-    print(f"JS length: {len(js)}")
-    
-    print("Decoding signature...")
-    download_url = get_download_url(target, js)
+    if args.audio_only:
+        format_id = prompt_user_choice(audio_only, "Audio Only")
+        download(args.url, format_id, args.output, as_mp3=True)
+        return
 
-    print("Downloading Video...")
-    video_bytes = fetch(download_url)
+    if args.best_video:
+        format_id = prompt_user_choice(full_video, "Full Video")
+        download(args.url, format_id, args.output)
+        return
 
-    safe_title = "".join(c for c in title if c.isalnum() or c in " -_").strip()
-    file_name = f"{safe_title}.mp4"
-    with open(file_name, "wb") as f:
-        f.write(video_bytes)
+    print("\nChoose Download Type:")
+    print(" [1] Full Video")
+    print(" [2] Video Only")
+    print(" [3] Audio Only")
 
-    print(f"Saved as {file_name} ({len(video_bytes)} bytes)")
+    while True:
+        choice = input("Choose: ").strip()
+        if choice in ["1", "2", "3"]:
+            break
+        print("Invalid selection.")
 
-if __name__=="__main__":
+    if choice == "1":
+        format_id = prompt_user_choice(full_video, "Full Video")
+        download(args.url, format_id, args.output)
+    elif choice == "2":
+        format_id = prompt_user_choice(video_only, "Video Only")
+        download(args.url, format_id, args.output)
+    elif choice == "3":
+        format_id = prompt_user_choice(audio_only, "Audio Only")
+        download(args.url, format_id, args.output, as_mp3=True)
+
+
+if __name__ == "__main__":
     main()
