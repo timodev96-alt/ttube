@@ -1,6 +1,8 @@
+import imageio_ffmpeg
 import argparse
 import sys
 from yt_dlp import YoutubeDL
+
 
 
 def progress_hook(d):
@@ -8,11 +10,11 @@ def progress_hook(d):
         percent = d.get("_percent_str", "0.0%").strip()
         speed = d.get("_speed_str", "?").strip()
         eta = d.get("_eta_str", "?").strip()
-        sys.stdout.write(f"\r[Downloading] {percent}, Speed: {speed}, ETA: {eta}")
+        sys.stdout.write(f"\r  {percent}  |  {speed}  |  ETA {eta}   ")
         sys.stdout.flush()
     elif d["status"] == "finished":
-        print("\nDownload complete! Processing...")
-
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        print("  Downloaded. Finalizing...")
 
 def height_from_resolution(resolution):
     try:
@@ -20,9 +22,8 @@ def height_from_resolution(resolution):
     except (ValueError, AttributeError):
         return 0
 
-
-def get_available_formats(url, quiet=True):
-    ydl_opts = {"quiet": quiet, "no_warnings": quiet}
+def get_available_formats(url, verbose=False):
+    ydl_opts = {"quiet": not verbose, "no_warnings": not verbose}
     with YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
@@ -66,7 +67,6 @@ def get_available_formats(url, quiet=True):
 
     return title, duration, video_only_list, audio_only_sorted
 
-
 def print_header(title, duration):
     print()
     print("=" * 60)
@@ -74,19 +74,31 @@ def print_header(title, duration):
     print(f"Duration: {duration}")
     print("=" * 60)
 
-
-def prompt_user_choice(options, label):
+def prompt_user_choice(options, label, output_format):
     if not options:
         print(f"No {label} formats available.")
         sys.exit(1)
-    print(f"\n{label} — choose a quality:\n")
+    print(f"\n{label}  choose a quality: \n")
     for idx, opt in enumerate(options, 1):
         if "abr" in opt:
-            desc = f"{int(opt['abr'])} kbps"
+            desc = f"{int(opt['abr'])} kbps (Audio)"
         else:
-            fps = f" {opt['fps']}fps" if opt.get("fps") else ""
-            desc = f"{opt['resolution']}{fps}"
-        print(f"  [{idx}]  {desc:<18} ({opt['ext']})")
+            res = opt['resolution']
+            if "x" in res:
+                height = res.split("x")[-1]
+                quality_label = f"{height}p"
+            else:
+                quality_label = res
+
+            fps = opt.get("fps")
+            if fps and fps > 30:
+                quality_label += str(int(fps))
+
+            desc = f"{quality_label}"
+            if opt.get("fps") and fps <= 30:
+                desc += f" ({opt['fps']}fps)"
+
+        print(f"  [{idx}]   {desc:<18}")
 
     while True:
         raw = input(f"\n  Select (1-{len(options)}): ").strip()
@@ -94,12 +106,15 @@ def prompt_user_choice(options, label):
             return options[int(raw) - 1]
         print("  Invalid choice, try again.")
 
-
-def build_ydl_opts(format_spec, output_dir, as_mp3=False):
+def build_ydl_opts(format_spec, output_dir, as_mp3=False, verbose=False):
     ydl_opts = {
         "format": format_spec,
         "progress_hooks": [progress_hook],
         "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
+        "quiet": not verbose,
+        "no_warnings": not verbose,
+        "noprogress": True,
+        "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe()
     }
     if as_mp3:
         ydl_opts["postprocessors"] = [{
@@ -111,28 +126,36 @@ def build_ydl_opts(format_spec, output_dir, as_mp3=False):
         ydl_opts["merge_output_format"] = "mp4"
     return ydl_opts
 
-
-def download(url, format_spec, output_dir, as_mp3=False):
-    ydl_opts = build_ydl_opts(format_spec, output_dir, as_mp3)
-    print("\nDownloading...")
+def download(url, format_spec, output_dir, as_mp3=False, verbose=False):
+    ydl_opts = build_ydl_opts(format_spec, output_dir, as_mp3, verbose)
+    print("\nDownloading:")
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    print("\nDone!")
+    print("  Done!")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Simple YouTube downloading CLI app!")
-    parser.add_argument("url", help="YouTube video URL")
+    parser.add_argument("url", nargs="?",help="YouTube video URL")
     parser.add_argument("-o", "--output", default=".", help="Output directory (default: current folder)")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress yt-dlp's own log output")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show yt-dlp's raw output (for debugging)")
     args = parser.parse_args()
 
+    if not args.url:
+        print("=" * 60)
+        print(" ttube - Youtube Video/Audio downloader!")
+        print("="*60)
+        print("\n Paste Youtube URL to get started!")
+        print("   ttube <video_URL>")
+        print("\n options:")
+        print(" -o, --output Choose a download folder (Default current folder)")
+
     print("Fetching info...")
-    title, duration, video_only, audio_only = get_available_formats(args.url, quiet=args.quiet)
+    title, duration, video_only, audio_only = get_available_formats(args.url, verbose=args.verbose)
     print_header(title, duration)
 
     print("\nWhat do you want to download?")
-    print("  [1] Video")
+    print("  [1] Full Video")
     print("  [2] Audio only")
 
     while True:
@@ -142,13 +165,12 @@ def main():
         print("Invalid selection.")
 
     if choice == "1":
-        picked = prompt_user_choice(video_only, "Video")
-        format_spec = f"{picked['format_id']}+bestaudio/best"
-        download(args.url, format_spec, args.output)
+        picked = prompt_user_choice(video_only, "Video", "mp4")
+        format_spec = f"{picked['format_id']}+bestaudio[ext=m4a]/bestaudio/best"
+        download(args.url, format_spec, args.output, verbose=args.verbose)
     else:
-        picked = prompt_user_choice(audio_only, "Audio")
-        download(args.url, picked["format_id"], args.output, as_mp3=True)
-
+        picked = prompt_user_choice(audio_only, "Audio", "mp3")
+        download(args.url, picked["format_id"], args.output, as_mp3=True, verbose=args.verbose)
 
 if __name__ == "__main__":
     main()
