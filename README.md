@@ -12,7 +12,7 @@ pip install ttube
 ```
 ttube "Video URL"
 ```
-##### Choose File location -Optinal-
+##### Choose File location -Optional-
 ```
 ttube "Video Url" -o "C:\Downloads"
 ```
