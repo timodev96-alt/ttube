@@ -1,5 +1,6 @@
 # ttube
 ##### A Simple CLI app that lets you Download Youtube Videos -or just its audio-!
+<img width="969" height="816" alt="ttube" src="https://github.com/user-attachments/assets/477c6a2f-bffb-4c4d-ab0a-663e61728667" />
 
 
 ## Installation
