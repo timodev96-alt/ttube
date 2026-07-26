@@ -1,5 +1,5 @@
 # ttube
-##### A Simple CLI app that lets you Download Youtube Videos -or just its audio-!
+##### A Simple CLI app that lets you Download Videos -or just their audio- from YouTube and 1000+ other sites!
 
 ## Installation
 ```
@@ -23,6 +23,7 @@ What do you want to download?
   [1] Full Video
   [2] Audio only
 ```
+note: if the site only offers one type -like audio-only sites- this step is skipped automatically!
 
 ### 3.Choose The Quality!
 ```
@@ -43,5 +44,17 @@ Audio choose a quality:
   [3]   48 kbps (Audio)
   [4]   46 kbps (Audio)
 ```
+
+## Other commands
+```
+ttube history
+```
+Shows your past downloads
+
+```
+ttube config
+```
+Shows your saved settings -like output folder and default format-
+
 ## AI Disclosure
-### I used AI to help debug this project, Not the core Code!
+### I used AI to help debug this project, and to help design/add some of its features

@@ -5,12 +5,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name='ttube',
-    version='0.1.0',
+    version='0.1.2',
     description='Youtube Video/Audio Downloader!',
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    install_requires=['yt_dlp','imageio-ffmpeg'],
+    install_requires=['yt_dlp','imageio-ffmpeg','rich'],
     author='Timothy Emad',
     entry_points={
         'console_scripts':[
