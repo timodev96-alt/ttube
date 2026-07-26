@@ -1,5 +1,6 @@
 # ttube
-##### A Simple CLI app that lets you Download Videos -or just their audio- from YouTube and 1000+ other sites!
+##### A Simple CLI app that lets you Download Youtube Videos -or just its audio-!
+
 
 ## Installation
 ```
